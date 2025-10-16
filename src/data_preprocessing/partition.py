@@ -11,7 +11,7 @@ parquet_file_path_DF = './data/processed/players_data_DF.parquet'
 parquet_file_path_MF = './data/processed/players_data_MF.parquet'
 parquet_file_path_FW = './data/processed/players_data_FW.parquet'
 
-# Read the CSV fils into a Pandas DataFrame
+# Read the CSV file into a Pandas DataFrame
 df = pd.read_csv(csv_file_path)
 # Write a sample of the dataframe to a CSV file for inspection
 df.sample(5).to_csv('./data/raw/sample_players_data.csv', index=False)
