@@ -30,6 +30,7 @@ from sklearn.metrics import (
 )
 from sklearn.metrics.pairwise import cosine_distances
 from sklearn.preprocessing import StandardScaler
+import matplotlib.pyplot as plt
 
 from src.data_preprocessing.features import (
     stratified_split,
@@ -420,6 +421,69 @@ def knn_distance_baselines(
     }
 
 
+def _embed_2d(train_X: np.ndarray, test_X: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Ensure 2D embeddings for plotting; pad with zeros if only 1 feature."""
+    if train_X.shape[1] >= 2:
+        return train_X[:, :2], test_X[:, :2]
+    # pad one extra dimension of zeros
+    def pad(arr: np.ndarray) -> np.ndarray:
+        if arr.shape[0] == 0:
+            return np.zeros((0, 2))
+        z = np.zeros((arr.shape[0], 1))
+        return np.hstack([arr, z])
+
+    return pad(train_X), pad(test_X)
+
+
+def save_cluster_plot(
+    train_X: np.ndarray,
+    test_X: np.ndarray,
+    train_labels: np.ndarray,
+    test_labels: np.ndarray,
+    pos: str,
+    path: Path,
+):
+    train_emb, test_emb = _embed_2d(train_X, test_X)
+    unique_labels = np.unique(np.concatenate([train_labels, test_labels]))
+    cmap = plt.get_cmap("tab10")
+    fig, ax = plt.subplots(figsize=(8, 6))
+
+    for lbl in unique_labels:
+        mask_tr = train_labels == lbl
+        if mask_tr.any():
+            ax.scatter(
+                train_emb[mask_tr, 0],
+                train_emb[mask_tr, 1],
+                s=18,
+                alpha=0.6,
+                color=cmap(int(lbl) % 10),
+                label=f"Train c{lbl}",
+            )
+        mask_te = test_labels == lbl
+        if mask_te.any():
+            ax.scatter(
+                test_emb[mask_te, 0],
+                test_emb[mask_te, 1],
+                s=28,
+                alpha=0.9,
+                marker="x",
+                color=cmap(int(lbl) % 10),
+                label=f"Test c{lbl}",
+            )
+
+    ax.set_title(f"{pos} clusters (train circles, test x)")
+    ax.set_xlabel("Component 1")
+    ax.set_ylabel("Component 2")
+    ax.legend(loc="best", fontsize=8, ncol=2)
+    ax.grid(True, alpha=0.2)
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.tight_layout()
+    fig.savefig(path, dpi=200)
+    plt.close(fig)
+    print(f"Saved cluster plot to {path}")
+
+
 def run_position(
     pos: str = "FW",
     k_grid: tuple[int, ...] = (2, 3, 4),
@@ -427,6 +491,7 @@ def run_position(
     min_variance: float = 1e-6,
     corr_thresh: float = 0.9,
     with_pca: float | bool = 0.95,
+    with_pca_grid: tuple[float | bool, ...] | None = None,
     seed: int = 42,
     use_groups=None,
     group_presets=None,
@@ -435,6 +500,9 @@ def run_position(
     example_players=None,
     recommend_players=None,
     compute_graph_stats: bool = False,
+    plot_clusters: bool = False,
+    plot_path: str | None = None,
+    plot_all_pca: bool = False,
 ):
     df = load_position_df(pos)
 
@@ -454,6 +522,7 @@ def run_position(
     best_combo = None
     best_row = None
     best_state = None
+    runs_for_plot = []
     
     # -------- Model selection phase: choose groups + k ----------
     for combo in combos:
@@ -471,41 +540,60 @@ def run_position(
             allowed_numeric=allowed_numeric,
         )
 
-        try:
-            feats = fit_transforms(
-                train_df,
-                val_df,
-                test_df,
-                numeric_cols,
-                with_pca=with_pca,
-                seed=seed,
+        pca_options = list(with_pca_grid) if with_pca_grid is not None else [with_pca]
+        for pca_opt in pca_options:
+            try:
+                feats = fit_transforms(
+                    train_df,
+                    val_df,
+                    test_df,
+                    numeric_cols,
+                    with_pca=pca_opt,
+                    seed=seed,
+                )
+            except ValueError as e:
+                print(f"Skipping combo {combo} with_pca={pca_opt}: {e}")
+                continue
+
+            group_msg = f"groups={combo}" if combo else "groups=all"
+            print(f"\n{pos}: kept {len(numeric_cols)} numeric cols; with_pca={pca_opt}; {group_msg}")
+            val_results = sweep_k(feats["X_train"], feats["X_val"], val_df, k_grid, seed=seed)
+            val_results["with_pca"] = pca_opt
+            print("Validation metrics:")
+            print(val_results)
+
+            best_k = choose_k(val_results)
+            chosen_row = val_results[val_results["k"] == best_k].iloc[0]
+            results_summary.append(
+                {
+                    "groups": combo,
+                    "with_pca": pca_opt,
+                    "best_k": best_k,
+                    "silhouette": chosen_row["silhouette"],
+                }
             )
-        except ValueError as e:
-            print(f"Skipping combo {combo}: {e}")
-            continue
 
-        group_msg = f"groups={combo}" if combo else "groups=all"
-        print(f"\n{pos}: kept {len(numeric_cols)} numeric cols; with_pca={with_pca}; {group_msg}")
-        val_results = sweep_k(feats["X_train"], feats["X_val"], val_df, k_grid, seed=seed)
-        print("Validation metrics:")
-        print(val_results)
-
-        best_k = choose_k(val_results)
-        chosen_row = val_results[val_results["k"] == best_k].iloc[0]
-        results_summary.append(
-            {"groups": combo, "best_k": best_k, "silhouette": chosen_row["silhouette"]}
-        )
-
-        if best_row is None or chosen_row["silhouette"] > best_row["silhouette"]:
-            best_row = chosen_row
-            best_combo = combo
-            best_state = (numeric_cols, feats, best_k, group_msg)
+            if best_row is None or chosen_row["silhouette"] > best_row["silhouette"]:
+                best_row = chosen_row
+                best_combo = combo
+                best_state = (numeric_cols, feats, best_k, group_msg, pca_opt)
+            if plot_clusters and plot_all_pca:
+                runs_for_plot.append(
+                    {
+                        "numeric_cols": numeric_cols,
+                        "feats": feats,
+                        "best_k": best_k,
+                        "group_msg": group_msg,
+                        "pca_opt": pca_opt,
+                        "combo": combo,
+                    }
+                )
 
     # -------- Final clustering on train split, test evaluation ----------
     if best_state is None:
         raise RuntimeError("No valid feature sets found; relax filtering thresholds or adjust group selections.")
-    numeric_cols, feats, best_k, group_msg = best_state
-    print(f"\nSelected combo: {group_msg} with k={best_k}")
+    numeric_cols, feats, best_k, group_msg, best_with_pca = best_state
+    print(f"\nSelected combo: {group_msg} with k={best_k}; with_pca={best_with_pca}")
     km = fit_final_model(feats["X_train"], best_k, seed=seed)
     test_labels = km.predict(feats["X_test"])
 
@@ -532,6 +620,27 @@ def run_position(
             "self_hit_at_10": test_self_hit,
         }
     )
+
+    if plot_clusters:
+        try:
+            plot_out = Path(plot_path) if plot_path else Path(__file__).resolve().parents[2] / "plots" / f"{pos}_clusters.png"
+            save_cluster_plot(feats["X_train"], feats["X_test"], km.labels_, test_labels, pos, plot_out)
+        except Exception as e:
+            print(f"Could not plot clusters: {e}")
+
+    if plot_clusters and plot_all_pca and runs_for_plot:
+        base_dir = Path(plot_path).parent if plot_path else Path(__file__).resolve().parents[2] / "plots"
+        for run in runs_for_plot:
+            try:
+                km_plot = fit_final_model(run["feats"]["X_train"], run["best_k"], seed=seed)
+                test_labels_plot = km_plot.predict(run["feats"]["X_test"])
+                combo_tag = "all" if run["combo"] is None else "_".join(run["combo"])
+                pca_tag = str(run["pca_opt"]).replace(".", "p")
+                fname = f"{pos}_{combo_tag}_pca{pca_tag}_k{run['best_k']}.png"
+                plot_out = base_dir / fname
+                save_cluster_plot(run["feats"]["X_train"], run["feats"]["X_test"], km_plot.labels_, test_labels_plot, pos, plot_out)
+            except Exception as e:
+                print(f"Could not plot combo {run['combo']} with_pca={run['pca_opt']}: {e}")
     # -------- In-split neighbor inspection (test -> train) ----------
     neighbors_fn = nearest_train_neighbors(
         km,
@@ -579,9 +688,9 @@ def run_position(
             full_scaled = full_scaler.fit_transform(full_imp)
 
             full_pca = None
-            if with_pca:
+            if best_with_pca:
                 full_pca = PCA(
-                    n_components=with_pca,
+                    n_components=best_with_pca,
                     svd_solver="full",
                     random_state=seed,
                 )
@@ -631,6 +740,7 @@ def run_position(
         "val_results": results_summary,
         "best_combo": best_combo,
         "best_k": best_k,
+        "best_with_pca": best_with_pca,
         "test_metrics": {
             "silhouette": test_sil,
             "db": test_db,
@@ -674,20 +784,16 @@ if __name__ == "__main__":
     #     compute_graph_stats=False
     # )
     run_position(
-        pos="DF",
-        k_grid=(3, 4),
-        with_pca=0.6,
-        include_pca_top=True,
-        recommend_players=["Jules Koundé"],
-        pca_top_n=15,
-        group_presets=[
-            None,
-            ["defense"],
-            ["defense", "passing"],
-            ["defense", "passing", "possession", "misc"],
-        ],
-        compute_graph_stats=False
-    )
+    pos="FW",
+    group_presets=[["goal_shot_creation"]],
+    k_grid=(3,4),
+    with_pca_grid=(2,3),
+    plot_clusters=True,
+    plot_all_pca=True,  # saves plots for each tested PCA preset
+)
+
+
+
     # run_position(
     #     pos="GK",
     #     k_grid=(2, 3),

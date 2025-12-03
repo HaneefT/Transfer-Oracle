@@ -6,3 +6,6 @@ __pycache__/
 
 # ignore the pdf reports
 *.pdf
+
+# ignore plot files
+plots/
