@@ -1,0 +1,8 @@
+#ignore the venv
+.TOenv/
+
+# ignore python cache files
+__pycache__/
+
+# ignore the pdf reports
+*.pdf

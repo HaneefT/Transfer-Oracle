@@ -7,3 +7,5 @@ def adjust_column_names(file_path):
         d[i[1]] = i[2]
     return d
 
+print(adjust_column_names('../../data/AdjustedColDict_data/DF_Players_Column_Adjust.xlsx'))
+
