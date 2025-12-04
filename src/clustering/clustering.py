@@ -483,6 +483,54 @@ def save_cluster_plot(
     plt.close(fig)
     print(f"Saved cluster plot to {path}")
 
+def run_position_for_testing(
+    pos: str,
+    k: int,
+    seed: int = 42,
+    with_pca: float | bool = 0.95,
+    use_groups=None,
+):
+    """
+    Lightweight version of run_position() that:
+      - loads data
+      - does train/val/test split
+      - builds numeric masks & PCA
+      - fits final model with provided k
+      - returns exactly the data needed for tests:
+            X_train, X_test, train_df, test_df, labels_train, labels_test, model
+    """
+    df = load_position_df(pos)
+    train_df, val_df, test_df = stratified_split(df, seed=seed)
+
+    allowed_numeric = select_group_columns(train_df, use_groups)
+    numeric_cols = feature_mask_from_train(train_df, allowed_numeric=allowed_numeric)
+
+    feats = fit_transforms(
+        train_df, val_df, test_df,
+        numeric_cols,
+        with_pca=with_pca,
+        seed=seed,
+    )
+
+    X_train = feats["X_train"]
+    X_test = feats["X_test"]
+
+    model = fit_final_model(X_train, k, seed=seed)
+
+    labels_train = model.labels_
+    labels_test = model.predict(X_test)
+
+    return {
+        "X_train": X_train,
+        "X_test": X_test,
+        "train_df": train_df,
+        "test_df": test_df,
+        "labels_train": labels_train,
+        "labels_test": labels_test,
+        "model": model,
+    }
+
+
 
 def run_position(
     pos: str = "FW",
@@ -785,11 +833,18 @@ if __name__ == "__main__":
     # )
     run_position(
     pos="FW",
-    group_presets=[["goal_shot_creation"]],
+    group_presets=[
+            None,
+            ["passing", "goal_shot_creation", "pass_types", "possession"],
+        ],
     k_grid=(3,4),
     with_pca_grid=(2,3),
     plot_clusters=True,
     plot_all_pca=True,  # saves plots for each tested PCA preset
+    include_pca_top=True,
+    pca_top_n=32,
+    recommend_players=["Lamine Yamal"],
+    compute_graph_stats=True
 )
 
 
