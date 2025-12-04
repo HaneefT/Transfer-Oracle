@@ -374,7 +374,7 @@ def knn_distance_baselines(
     query_pos = df.loc[query_idx, "Pos"] if "Pos" in df.columns else None
     query_cluster = labels[query_idx]
 
-    # Real KNN neighbors within the same cluster (your actual system)
+    # Real KNN neighbors within the same cluster
     per_cluster = build_per_cluster_knn(X, labels, n_neighbors=k + 1, metric="cosine")
     nn, idx = per_cluster[int(query_cluster)]
     n_q = min(k + 1, len(idx))
