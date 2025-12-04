@@ -689,6 +689,8 @@ def run_position(
                 save_cluster_plot(run["feats"]["X_train"], run["feats"]["X_test"], km_plot.labels_, test_labels_plot, pos, plot_out)
             except Exception as e:
                 print(f"Could not plot combo {run['combo']} with_pca={run['pca_opt']}: {e}")
+
+                
     # -------- In-split neighbor inspection (test -> train) ----------
     neighbors_fn = nearest_train_neighbors(
         km,
@@ -798,6 +800,191 @@ def run_position(
         },
     }
 
+def run_knn_evaluation(
+    pos: str = "FW",
+    k_neighbors: int = 10,
+    n_queries: int = 100,
+    seed: int = 42,
+    with_pca: float | bool = 0.95,
+    use_groups=None,
+):
+    """
+    End-to-end KNN evaluation on a held-out test set.
+
+    Steps:
+      1) Load position-specific data and do leak-free train/val/test split.
+      2) Build numeric feature mask on train and fit transforms (imputer, scaler, PCA).
+      3) Fit KMeans on train only, get cluster labels for train and test.
+      4) For N random test players:
+           - Compute mean distance to their k nearest train neighbors (within same cluster).
+           - Compute mean distance to k random train players:
+               a) from same cluster
+               b) from same base position (i.e., any train row)
+           - Record distances and ratios.
+      5) Return a summary dict + per-query DataFrame for reporting.
+    """
+    # 1) Load and split
+    df = load_position_df(pos)
+    train_df, val_df, test_df = stratified_split(df, seed=seed)
+
+    # 2) Feature selection and transforms (no PCA grid search here; single setting)
+    allowed_numeric = select_group_columns(train_df, use_groups)
+    numeric_cols = feature_mask_from_train(train_df, allowed_numeric=allowed_numeric)
+
+    feats = fit_transforms(
+        train_df,
+        val_df,
+        test_df,
+        numeric_cols,
+        with_pca=with_pca,
+        seed=seed,
+    )
+
+    X_train = feats["X_train"]
+    X_test = feats["X_test"]
+
+    # 3) Fit KMeans on train, get labels
+    #    You can choose k here or reuse a fixed small grid; for simplicity pick a reasonable default.
+    #    Option 1: fixed k (e.g., 4); Option 2: small sweep like in run_position.
+    #    Here we do a tiny sweep over k_grid=(3,4) on val.
+    k_grid = (3, 4)
+    val_results = sweep_k(feats["X_train"], feats["X_val"], val_df, k_grid, seed=seed)
+    best_k = choose_k(val_results)
+
+    km = fit_final_model(X_train, best_k, seed=seed)
+    labels_train = km.labels_
+    labels_test = km.predict(X_test)
+
+    # Build per-cluster KNN on TRAIN (cosine distance)
+    per_cluster = build_per_cluster_knn(
+        X_train,
+        labels_train,
+        n_neighbors=k_neighbors + 1,
+        metric="cosine",
+    )
+
+    rng = np.random.default_rng(seed)
+    n_test = X_test.shape[0]
+    if n_test == 0:
+        raise RuntimeError("Empty test set; cannot run KNN evaluation.")
+
+    query_indices = rng.choice(
+        np.arange(n_test),
+        size=min(n_queries, n_test),
+        replace=False,
+    )
+
+    rows = []
+
+    for local_idx in query_indices:
+        cluster = labels_test[local_idx]
+        if int(cluster) not in per_cluster:
+            continue
+
+        nn, train_idx = per_cluster[int(cluster)]
+
+        # --- true KNN distances: test -> train within same cluster ---
+        n_q = min(k_neighbors + 1, len(train_idx))
+        dists, inds = nn.kneighbors(
+            X_test[local_idx].reshape(1, -1),
+            n_neighbors=n_q,
+        )
+        global_inds = train_idx[inds[0]]
+
+        # Drop any accidental exact duplicate if it exists in train with same index
+        # (unlikely here because pools differ, but keep consistent with other utilities).
+        knn_dists = dists[0][:k_neighbors]
+        if len(knn_dists) == 0:
+            continue
+
+        mean_knn_dist = float(knn_dists.mean())
+
+        # --- random baselines from train ---
+
+        # a) random from same cluster (train side)
+        same_cluster_train_idx = np.where(labels_train == cluster)[0]
+        same_cluster_train_idx = same_cluster_train_idx[
+            np.isin(same_cluster_train_idx, train_idx)
+        ]
+        if len(same_cluster_train_idx) > 0:
+            size_sc = min(k_neighbors, len(same_cluster_train_idx))
+            rand_sc = rng.choice(
+                same_cluster_train_idx,
+                size=size_sc,
+                replace=len(same_cluster_train_idx) < k_neighbors,
+            )
+            rand_sc_dists = cosine_distances(
+                X_test[local_idx].reshape(1, -1),
+                X_train[rand_sc],
+            )[0]
+            mean_rand_same_cluster = float(rand_sc_dists.mean())
+        else:
+            mean_rand_same_cluster = float("nan")
+
+        # b) random from entire train pool (same base position)
+        all_train_idx = np.arange(X_train.shape[0])
+        size_gl = min(k_neighbors, len(all_train_idx))
+        rand_gl = rng.choice(
+            all_train_idx,
+            size=size_gl,
+            replace=len(all_train_idx) < k_neighbors,
+        )
+        rand_gl_dists = cosine_distances(
+            X_test[local_idx].reshape(1, -1),
+            X_train[rand_gl],
+        )[0]
+        mean_rand_global = float(rand_gl_dists.mean())
+
+        # --- ratios ---
+        row = {
+            "test_idx": int(local_idx),
+            "player": (
+                test_df.loc[local_idx, "Player"]
+                if "Player" in test_df.columns
+                else None
+            ),
+            "cluster": int(cluster),
+            "mean_knn_dist": mean_knn_dist,
+            "mean_rand_same_cluster": mean_rand_same_cluster,
+            "mean_rand_global": mean_rand_global,
+            "same_cluster_ratio": (
+                mean_rand_same_cluster / mean_knn_dist
+                if not np.isnan(mean_rand_same_cluster)
+                else np.nan
+            ),
+            "global_ratio": mean_rand_global / mean_knn_dist,
+        }
+        rows.append(row)
+
+    results_df = pd.DataFrame(rows)
+
+    # Aggregate summary for the report
+    summary = {
+        "pos": pos,
+        "k_neighbors": k_neighbors,
+        "best_k_clusters": best_k,
+        "n_queries_effective": int(len(results_df)),
+        "mean_knn_dist": float(results_df["mean_knn_dist"].mean())
+        if not results_df.empty
+        else float("nan"),
+        "mean_same_cluster_ratio": float(results_df["same_cluster_ratio"].mean())
+        if "same_cluster_ratio" in results_df.columns and not results_df.empty
+        else float("nan"),
+        "mean_global_ratio": float(results_df["global_ratio"].mean())
+        if "global_ratio" in results_df.columns and not results_df.empty
+        else float("nan"),
+    }
+
+    print("\nKNN evaluation summary (test -> train):")
+    print(summary)
+
+    return {
+        "summary": summary,
+        "per_query": results_df,
+        "val_results": val_results.to_dict(orient="records"),
+    }
+
+
 
 if __name__ == "__main__":
     # run_position(
@@ -831,21 +1018,30 @@ if __name__ == "__main__":
     #     ],
     #     compute_graph_stats=False
     # )
-    run_position(
-    pos="FW",
-    group_presets=[
-            None,
-            ["passing", "goal_shot_creation", "pass_types", "possession"],
-        ],
-    k_grid=(3,4),
-    with_pca_grid=(2,3),
-    plot_clusters=True,
-    plot_all_pca=True,  # saves plots for each tested PCA preset
-    include_pca_top=True,
-    pca_top_n=32,
-    recommend_players=["Lamine Yamal"],
-    compute_graph_stats=True
-)
+#     run_position(
+#     pos="FW",
+#     group_presets=[
+#             None,
+#             ["passing", "goal_shot_creation", "pass_types", "possession"],
+#         ],
+#     k_grid=(3,4),
+#     with_pca_grid=(2,3),
+#     plot_clusters=True,
+#     plot_all_pca=True,  # saves plots for each tested PCA preset
+#     include_pca_top=True,
+#     pca_top_n=32,
+#     recommend_players=["Lamine Yamal"],
+#     compute_graph_stats=True
+# )
+    
+    eval_fw = run_knn_evaluation(
+        pos="FW",
+        k_neighbors=10,
+        n_queries=100,
+        seed=42,
+        with_pca=0.95,
+        use_groups=["passing", "goal_shot_creation", "pass_types", "possession"],
+    )
 
 
 
