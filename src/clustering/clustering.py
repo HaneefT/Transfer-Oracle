@@ -1091,8 +1091,8 @@ if __name__ == "__main__":
     groups_pos = {
         "FW": ["passing", "goal_shot_creation", "pass_types","misc"],
         "MF": ["passing", "goal_shot_creation", "pass_types", "defensive_actions", "misc"],
-        "DF": ["passing", "pass_types", "defensive_actions", "aerial_duels", "misc"],
-        "GK": ["goalkeeping","passing", "pass_types", "misc"],
+        "DF": ["defensive_actions","possession", "misc"],
+        "GK": ["goalkeeing", "pass_types"],
     }
     run_position(
         pos="GK",
