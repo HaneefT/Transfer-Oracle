@@ -29,15 +29,13 @@ body {
 
 .to-root {
   min-height: 100vh;
-  padding: 24px;
+  padding: clamp(16px, 2vw, 32px);
   display: flex;
-  align-items: stretch;
   justify-content: center;
 }
 
 .to-main-card {
-  width: 100%;
-  max-width: 1100px;
+  width: min(1280px, calc(100vw - 32px));
   background: var(--card);
   border-radius: 24px;
   padding: 24px 26px 26px;
@@ -214,7 +212,7 @@ body {
 
 .to-content-row {
   display: grid;
-  grid-template-columns: minmax(0, 1.1fr) minmax(0, 1.4fr);
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
   gap: 20px;
   margin-top: 4px;
 }
