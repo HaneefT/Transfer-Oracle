@@ -473,6 +473,66 @@ def save_cluster_plot(
     print(f"Saved cluster plot to {path}")
 
 
+def plot_val_metrics_summary(
+    rows: list[dict],
+    pos: str,
+    out_dir: Path,
+):
+    if not rows:
+        return
+    df = pd.DataFrame(rows)
+    metrics = [m for m in ["silhouette", "db", "ch"] if m in df.columns]
+    if df.empty or not metrics:
+        return
+
+    abbrev = {
+        "goalkeeping": "GK",
+        "passing": "PS",
+        "pass_types": "PT",
+        "goal_shot_creation": "GSC",
+        "defensive_actions": "DEF",
+        "possession": "POS",
+        "misc": "MISC",
+        "pca_top": "PCA_TOP",
+        "all": "ALL",
+    }
+
+    def compact(tag: str) -> str:
+        parts = str(tag).split("_")
+        mapped = [abbrev.get(p, p[:4].upper()) for p in parts if p]
+        joined = "+".join(mapped) if mapped else str(tag)
+        return joined if len(joined) <= 20 else joined[:17] + "..."
+
+    df["combo_abbrev"] = df["combo_tag"].apply(compact)
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for metric in metrics:
+        fig, ax = plt.subplots(figsize=(max(6, len(df) * 0.35), 4))
+        x_pos = range(len(df))
+        bars = ax.bar(x_pos, df[metric])
+        ax.set_xticks(list(x_pos))
+        ax.set_xticklabels(df["combo_abbrev"], rotation=20, ha="right")
+        ax.set_title(f"{pos} validation {metric} (best k per combo)")
+        ax.set_ylabel(metric)
+        for rect, (_, row) in zip(bars, df.iterrows()):
+            ax.text(
+                rect.get_x() + rect.get_width() / 2,
+                rect.get_height() + (abs(rect.get_height()) * 0.02),
+                f"k={row['k']},pca={row['with_pca']}",
+                fontsize=7,
+                ha="center",
+                va="bottom",
+                rotation=0,
+            )
+        ax.grid(True, alpha=0.2)
+        fig.tight_layout()
+        fname = f"{pos}_val_{metric}.png"
+        path = out_dir / fname
+        fig.savefig(path, dpi=200)
+        plt.close(fig)
+        print(f"Saved {metric} bars to {path}")
+
+
 # ---------------------------------------------------------------------
 # Main clustering + recommendation
 # ---------------------------------------------------------------------
@@ -497,6 +557,8 @@ def run_position(
     plot_path: str | None = None,
     plot_all_pca: bool = False,
     return_artifacts: bool = False,
+    plot_val_metrics: bool = False,
+    val_plot_dir: str | None = None,
 ):
     df = load_position_df(pos)
 
@@ -515,6 +577,7 @@ def run_position(
     best_row = None
     best_state = None
     runs_for_plot = []
+    val_metric_rows: list[dict] = []
 
     # -------- Model selection phase: choose groups + PCA + k ----------
     for combo in combos:
@@ -564,6 +627,25 @@ def run_position(
                     "silhouette": chosen_row["silhouette"],
                 }
             )
+            if plot_val_metrics:
+                if combo is None:
+                    combo_tag = "all"
+                elif combo == "pca_top":
+                    combo_tag = "pca_top"
+                elif isinstance(combo, (list, tuple)):
+                    combo_tag = "_".join(combo)
+                else:
+                    combo_tag = str(combo)
+                val_metric_rows.append(
+                    {
+                        "combo_tag": combo_tag,
+                        "with_pca": pca_opt,
+                        "k": best_k,
+                        "silhouette": chosen_row.get("silhouette", float("nan")),
+                        "db": chosen_row.get("db", float("nan")),
+                        "ch": chosen_row.get("ch", float("nan")),
+                    }
+                )
 
             if best_row is None or chosen_row["silhouette"] > best_row["silhouette"]:
                 best_row = chosen_row
@@ -588,6 +670,10 @@ def run_position(
     print(f"\nSelected combo: {group_msg} with k={best_k}; with_pca={best_with_pca}")
     km = fit_final_model(feats["X_train"], best_k, seed=seed)
     test_labels = km.predict(feats["X_test"])
+
+    if plot_val_metrics and val_metric_rows:
+        plot_dir = Path(val_plot_dir) if val_plot_dir else PLOTS_DIR
+        plot_val_metrics_summary(val_metric_rows, pos, plot_dir)
 
     if len(np.unique(test_labels)) > 1:
         test_sil = silhouette_score(feats["X_test"], test_labels)
@@ -1003,29 +1089,43 @@ def run_error_analysis(
 
 if __name__ == "__main__":
     groups_pos = {
-        "FW": ["passing", "goal_shot_creation", "pass_types", "possession", "misc"],
-        "MF": ["passing", "goal_shot_creation", "pass_types", "possession", "defensive_actions", "misc"],
+        "FW": ["passing", "goal_shot_creation", "pass_types","misc"],
+        "MF": ["passing", "goal_shot_creation", "pass_types", "defensive_actions", "misc"],
         "DF": ["passing", "pass_types", "defensive_actions", "aerial_duels", "misc"],
-        "GK": ["goalkeepping","passing", "pass_types", "misc"],
+        "GK": ["goalkeeping","passing", "pass_types", "misc"],
     }
-    from pprint import pprint
-    for pos in ["FW", "MF", "DF", "GK"]:
-        print(f"\n=== Running error analysis for position: {pos} ===")
-        res = run_error_analysis(
-            pos=pos,
-            use_groups=["passing", "goal_shot_creation", "pass_types", "possession", "defensive_actions", "misc"],
-            k_grid=(3, 4, 5),
-            with_pca_grid=(False, 2, 3),
-            sample_size=None,
-            k_neighbors=10,
-            top_n_knn_outliers=3,
-            outlier_method="knn",
-            plot_outliers=False,
-            plot_path=None,
-        )
-        pprint(res["model_selection"])
-        pprint(res["baseline_summary"])
-        print("Worst examples by cluster gap:")
-        pprint([{k: ex[k] for k in ["player", "gap_same_cluster", "mean_knn_dist"]} for ex in res["worst_examples"]])
-        print("Worst examples by mean KNN distance:")
-        pprint([{k: ex[k] for k in ["player", "mean_knn_dist"]} for ex in res["worst_by_knn"]])
+    run_position(
+        pos="GK",
+        k_grid=(2,3),
+        with_pca_grid=(False, 2, 3),
+        group_presets=[groups_pos["GK"], ["passing", "goalkeeping", "pass_types", "possession"],
+                       ["passing", "goalkeeping", "pass_types","defensive_actions", "misc"],
+                       ["passing", "goalkeeping", "pass_types","defensive_actions"]],
+        compute_graph_stats=True,
+        plot_clusters=True,
+        plot_path=None,
+        include_pca_top=True,
+        return_artifacts=False,
+        plot_val_metrics=True,
+    )
+    # from pprint import pprint
+    # for pos in ["FW", "MF", "DF", "GK"]:
+    #     print(f"\n=== Running error analysis for position: {pos} ===")
+    #     res = run_error_analysis(
+    #         pos=pos,
+    #         use_groups=["passing", "goal_shot_creation", "pass_types", "possession", "defensive_actions", "misc"],
+    #         k_grid=(3, 4, 5),
+    #         with_pca_grid=(False, 2, 3),
+    #         sample_size=None,
+    #         k_neighbors=10,
+    #         top_n_knn_outliers=3,
+    #         outlier_method="knn",
+    #         plot_outliers=False,
+    #         plot_path=None,
+    #     )
+    #     pprint(res["model_selection"])
+    #     pprint(res["baseline_summary"])
+    #     print("Worst examples by cluster gap:")
+    #     pprint([{k: ex[k] for k in ["player", "gap_same_cluster", "mean_knn_dist"]} for ex in res["worst_examples"]])
+    #     print("Worst examples by mean KNN distance:")
+    #     pprint([{k: ex[k] for k in ["player", "mean_knn_dist"]} for ex in res["worst_by_knn"]])
