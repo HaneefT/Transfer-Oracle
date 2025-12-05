@@ -1009,23 +1009,74 @@ if __name__ == "__main__":
         "GK": ["goalkeepping","passing", "pass_types", "misc"],
     }
     from pprint import pprint
-    for pos in ["FW", "MF", "DF", "GK"]:
-        print(f"\n=== Running error analysis for position: {pos} ===")
-        res = run_error_analysis(
-            pos=pos,
-            use_groups=["passing", "goal_shot_creation", "pass_types", "possession", "defensive_actions", "misc"],
-            k_grid=(3, 4, 5),
-            with_pca_grid=(False, 2, 3),
-            sample_size=None,
-            k_neighbors=10,
-            top_n_knn_outliers=3,
-            outlier_method="knn",
-            plot_outliers=False,
-            plot_path=None,
-        )
-        pprint(res["model_selection"])
-        pprint(res["baseline_summary"])
-        print("Worst examples by cluster gap:")
-        pprint([{k: ex[k] for k in ["player", "gap_same_cluster", "mean_knn_dist"]} for ex in res["worst_examples"]])
-        print("Worst examples by mean KNN distance:")
-        pprint([{k: ex[k] for k in ["player", "mean_knn_dist"]} for ex in res["worst_by_knn"]])
+    # for pos in ["FW", "MF", "DF", "GK"]:
+    #     print(f"\n=== Running error analysis for position: {pos} ===")
+    #     res = run_error_analysis(
+    #         pos=pos,
+    #         use_groups=["passing", "goal_shot_creation", "pass_types", "possession", "defensive_actions", "misc"],
+    #         k_grid=(3, 4, 5),
+    #         with_pca_grid=(False, 2, 3),
+    #         sample_size=None,
+    #         k_neighbors=10,
+    #         top_n_knn_outliers=3,
+    #         outlier_method="knn",
+    #         plot_outliers=False,
+    #         plot_path=None,
+    #     )
+    #     pprint(res["model_selection"])
+    #     pprint(res["baseline_summary"])
+    #     print("Worst examples by cluster gap:")
+    #     pprint([{k: ex[k] for k in ["player", "gap_same_cluster", "mean_knn_dist"]} for ex in res["worst_examples"]])
+    #     print("Worst examples by mean KNN distance:")
+    #     pprint([{k: ex[k] for k in ["player", "mean_knn_dist"]} for ex in res["worst_by_knn"]])
+
+
+#     run_position(
+#     pos="DF",
+#     group_presets=[
+#             None,
+#             ["defensive_actions"],
+#             ["defensive_actions", "misc"],
+#             ["defensive_actions", "possession"],
+#             ["defensive_actions", "passing"],
+#             ["defensive_actions", "possession", "passing"],
+#             ["defensive_actions", "possession", "misc"],
+#             ["defensive_actions", "possession", "pass_types"],
+#             ["defensive_actions", "possession", "passing", "pass_types"],
+#             ["defensive_actions", "possession", "goal_shot_creation"],
+#             ["defensive_actions", "possession", "passing", "goal_shot_creation"],
+#             ["defensive_actions", "possession", "passing", "pass_types", "misc"]
+#         ],
+#     k_grid=(3,4,5),
+#     with_pca_grid=(2,3),
+#     plot_clusters=True,
+#     plot_all_pca=True,  # saves plots for each tested PCA preset
+#     include_pca_top=True,
+#     pca_top_n=32,
+#     compute_graph_stats=True
+# )
+    
+
+run_position(
+    pos="GK",
+    group_presets = [
+        None,
+        ["goalkeeping", "misc"],
+        ["goalkeeping", "passing"],
+        ["goalkeeping", "pass_types"],
+        ["goalkeeping", "passing", "pass_types"],
+        ["goalkeeping", "possession"],
+        ["goalkeeping", "possession", "passing"],
+        ["goalkeeping", "possession", "pass_types"],
+        ["goalkeeping", "defensive_actions"],
+        ["goalkeeping", "passing","pass_types", "defensive_actions"],
+        ["goalkeeping", "passing", "pass_types", "possession"],
+        ["goalkeeping", "passing", "pass_types", "possession", "misc"],
+    ],
+    k_grid=(2,3),
+    with_pca_grid=(2,3),
+    plot_clusters=True,
+    plot_all_pca=False,  # saves plots for each tested PCA preset
+    include_pca_top=True,
+    compute_graph_stats=True
+)
