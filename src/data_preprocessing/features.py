@@ -217,31 +217,6 @@ def stability_score(train_X, val_X, k, seed=42):
     return float(adjusted_rand_score(labels_a, labels_b))
 
 
-def infer_side(pos):
-    if not isinstance(pos, str):
-        return None
-    pos = pos.upper()
-    if "L" in pos:
-        return "L"
-    if "R" in pos:
-        return "R"
-    return None
-
-
-def bucket_age(age_val):
-    try:
-        age = float(age_val)
-    except (TypeError, ValueError):
-        return None
-    if age < 23:
-        return "<23"
-    if age < 27:
-        return "23-26"
-    if age < 31:
-        return "27-30"
-    return "31+"
-
-
 def build_per_cluster_knn(X, labels, n_neighbors=6, metric="cosine"):
     per_cluster = {}
     for c in np.unique(labels):
@@ -251,53 +226,6 @@ def build_per_cluster_knn(X, labels, n_neighbors=6, metric="cosine"):
         nn.fit(Xc)
         per_cluster[int(c)] = (nn, idx)
     return per_cluster
-
-
-def neighbor_consistency(X, labels, meta_df, k=5):
-    per_cluster = build_per_cluster_knn(X, labels, n_neighbors=k + 1)
-    foot_matches, side_matches, age_matches, comp_matches = [], [], [], []
-
-    for row_idx, cluster in enumerate(labels):
-        nn, idx = per_cluster[int(cluster)]
-        n_q = min(k + 1, len(idx))
-        _, inds = nn.kneighbors(X[row_idx].reshape(1, -1), n_neighbors=n_q)
-        global_inds = idx[inds[0]]
-        mask = global_inds != row_idx
-        global_inds = global_inds[mask][:k]
-        if len(global_inds) == 0:
-            continue
-
-        def match_ratio(col, transform):
-            if col not in meta_df.columns:
-                return None
-            base_val = transform(meta_df.iloc[row_idx][col])
-            if base_val is None:
-                return None
-            neigh_vals = [transform(meta_df.iloc[i][col]) for i in global_inds]
-            valid = [v for v in neigh_vals if v is not None]
-            if not valid:
-                return None
-            return sum(v == base_val for v in valid) / len(valid)
-
-        for col, transform, bucket in [
-            ("foot", lambda x: str(x).lower() if isinstance(x, str) else None, foot_matches),
-            ("Pos", infer_side, side_matches),
-            ("Age", bucket_age, age_matches),
-            ("Comp", lambda x: str(x) if isinstance(x, str) else None, comp_matches),
-        ]:
-            ratio = match_ratio(col, transform)
-            if ratio is not None:
-                bucket.append(ratio)
-
-    def safe_mean(values):
-        return float(np.mean(values)) if values else np.nan
-
-    return {
-        "foot_purity": safe_mean(foot_matches),
-        "side_purity": safe_mean(side_matches),
-        "age_bucket_purity": safe_mean(age_matches),
-        "comp_purity": safe_mean(comp_matches),
-    }
 
 
 if __name__ == "__main__":

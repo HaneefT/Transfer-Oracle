@@ -42,6 +42,10 @@ from src.data_preprocessing.features import (
 )
 from src.data_preprocessing.groups import GROUPS
 
+# ---------------------------------------------------------------------
+# Config / constants
+# ---------------------------------------------------------------------
+
 CATEGORICAL_COLS = [
     "Rk",
     "Player",
@@ -62,8 +66,20 @@ CATEGORICAL_COLS = [
     "L",
 ]
 
-# Resolve data dir relative to repository root
-DATA_DIR = Path(__file__).resolve().parents[2] / "data" / "processed"
+# Try to define a stable project root for saving plots
+try:
+    BASE_DIR = Path(__file__).resolve().parents[2]
+except NameError:
+    # Fallback for notebook contexts
+    BASE_DIR = Path.cwd()
+
+DATA_DIR = BASE_DIR / "data" / "processed"
+PLOTS_DIR = BASE_DIR / "plots"
+
+
+# ---------------------------------------------------------------------
+# Data + feature helpers
+# ---------------------------------------------------------------------
 
 
 def load_position_df(pos: str) -> pd.DataFrame:
@@ -80,7 +96,7 @@ def select_group_columns(df: pd.DataFrame, use_groups) -> list[str] | None:
     for g in use_groups:
         cols = GROUPS.get(g, [])
         selected.extend(cols)
-    selected = list(dict.fromkeys(selected))  # dedupe, keep order
+    selected = list(dict.fromkeys(selected))
     return [c for c in selected if c in df.columns]
 
 
@@ -162,6 +178,11 @@ def fit_final_model(train_X, k: int, seed: int = 42) -> KMeans:
     return km
 
 
+# ---------------------------------------------------------------------
+# KNN helpers
+# ---------------------------------------------------------------------
+
+
 def nearest_train_neighbors(
     km: KMeans,
     train_X: np.ndarray,
@@ -180,7 +201,6 @@ def nearest_train_neighbors(
     Build per-cluster KNN on the training pool, then provide a callable
     that returns top-k neighbors in train_df for any test index.
     """
-
     per_cluster = build_per_cluster_knn(
         train_X,
         km.labels_,
@@ -199,7 +219,6 @@ def nearest_train_neighbors(
         )
         global_inds = idx[inds[0]]
 
-        # Columns to carry through for inspection and later filters
         cols_to_show = [
             c
             for c in [
@@ -232,7 +251,6 @@ def nearest_train_neighbors(
                 self_mask &= out[id_col].astype(str).str.lower() != qid
             out = out[self_mask]
 
-        # Optional post-hoc filters
         if prefer_same_foot and "foot" in train_df.columns and "foot" in query.index:
             qf = str(query["foot"]).lower()
             if "foot" in out.columns:
@@ -268,47 +286,6 @@ def nearest_train_neighbors(
     return for_test_idx
 
 
-def knn_reciprocity_stats(X: np.ndarray, labels: np.ndarray, k: int = 5) -> dict:
-    """
-    Debug utility: simple KNN graph stats on a given split (uses that split
-    as both query and pool). Not needed for the main recommender,
-    but useful for geometry inspection.
-    """
-    per_cluster = build_per_cluster_knn(X, labels, n_neighbors=k + 1, metric="cosine")
-    total = 0
-    mutual = 0
-    mean_kth_dist: list[float] = []
-
-    for _, (nn, idx) in per_cluster.items():
-        if len(idx) < 2:
-            continue
-        n_q = min(k + 1, len(idx))
-        dists, inds = nn.kneighbors(X[idx], n_neighbors=n_q)
-
-        for row_idx, (row_inds, row_dists) in enumerate(zip(inds, dists)):
-            global_inds = idx[row_inds]
-            mask = global_inds != idx[row_idx]
-            neighs = global_inds[mask][:k]
-            neigh_dists = row_dists[mask][:k]
-            if len(neighs) == 0:
-                continue
-            total += len(neighs)
-            mean_kth_dist.append(neigh_dists[-1])
-
-            for n in neighs:
-                n_neighbors = idx[
-                    inds[nn.kneighbors(X[n].reshape(1, -1), n_neighbors=n_q)[1][0]]
-                ]
-                if idx[row_idx] in n_neighbors[1:]:  # exclude self at [0]
-                    mutual += 1
-
-    reciprocity = mutual / total if total else np.nan
-    return {
-        "reciprocity": reciprocity,
-        "mean_kth_dist": float(np.mean(mean_kth_dist)) if mean_kth_dist else np.nan,
-    }
-
-
 def self_hit_rate(
     X: np.ndarray,
     labels: np.ndarray,
@@ -316,8 +293,7 @@ def self_hit_rate(
     eps: float = 1e-9,
 ) -> float:
     """
-    Debug utility: leave-one-out self hit.
-    For each point, query within its cluster excluding itself,
+    Leave-one-out self hit: for each point, query within its cluster excluding itself,
     count a hit if the nearest neighbor is effectively identical (distance <= eps).
     Useful to flag collapses/duplicates.
     """
@@ -357,12 +333,7 @@ def knn_distance_baselines(
     """
     Compute simple distance-based baselines for a single query player.
 
-    X         : feature matrix used for clustering/KNN (same as used for KMeans).
-    labels    : cluster labels for X (e.g., km_full.labels_).
-    df        : dataframe aligned with X (must contain 'Pos').
-    query_idx : integer index of the query row in X/df.
-    k         : number of nearest neighbours for the "real" KNN distance.
-    n_random  : number of random samples per baseline.
+    Used mainly for illustrative case studies (e.g., Lamine Yamal).
     """
     rng = np.random.default_rng(seed)
     n = X.shape[0]
@@ -374,14 +345,12 @@ def knn_distance_baselines(
     query_pos = df.loc[query_idx, "Pos"] if "Pos" in df.columns else None
     query_cluster = labels[query_idx]
 
-    # Real KNN neighbors within the same cluster
     per_cluster = build_per_cluster_knn(X, labels, n_neighbors=k + 1, metric="cosine")
     nn, idx = per_cluster[int(query_cluster)]
     n_q = min(k + 1, len(idx))
     dists, inds = nn.kneighbors(query_vec, n_neighbors=n_q)
     global_inds = idx[inds[0]]
 
-    # Drop self if present, then take top-k
     mask_self = global_inds != query_idx
     knn_dists = dists[0][mask_self][:k]
     mean_knn_dist = float(knn_dists.mean()) if len(knn_dists) else float("nan")
@@ -396,18 +365,15 @@ def knn_distance_baselines(
         rand_dists = cosine_distances(query_vec, X[sample_idx])[0]
         return float(rand_dists.mean())
 
-    # Random players from same cluster
     same_cluster_idx = np.where(labels == query_cluster)[0]
     mean_rand_same_cluster = random_distances(same_cluster_idx)
 
-    # Random players with same position (if available)
     if query_pos is not None:
         same_pos_idx = df.index[df["Pos"] == query_pos].to_numpy()
         mean_rand_same_pos = random_distances(same_pos_idx)
     else:
         mean_rand_same_pos = float("nan")
 
-    # Random players from entire pool
     all_idx = np.arange(n)
     mean_rand_global = random_distances(all_idx)
 
@@ -421,11 +387,16 @@ def knn_distance_baselines(
     }
 
 
+# ---------------------------------------------------------------------
+# Plotting helpers
+# ---------------------------------------------------------------------
+
+
 def _embed_2d(train_X: np.ndarray, test_X: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Ensure 2D embeddings for plotting; pad with zeros if only 1 feature."""
     if train_X.shape[1] >= 2:
         return train_X[:, :2], test_X[:, :2]
-    # pad one extra dimension of zeros
+
     def pad(arr: np.ndarray) -> np.ndarray:
         if arr.shape[0] == 0:
             return np.zeros((0, 2))
@@ -442,6 +413,7 @@ def save_cluster_plot(
     test_labels: np.ndarray,
     pos: str,
     path: Path,
+    highlight_points: list[dict] | None = None,
 ):
     train_emb, test_emb = _embed_2d(train_X, test_X)
     unique_labels = np.unique(np.concatenate([train_labels, test_labels]))
@@ -477,59 +449,33 @@ def save_cluster_plot(
     ax.legend(loc="best", fontsize=8, ncol=2)
     ax.grid(True, alpha=0.2)
 
+    # Optional annotated highlights (e.g., worst examples)
+    if highlight_points:
+        for hp in highlight_points:
+            set_name = hp.get("set")
+            idx = hp.get("index")
+            label = str(hp.get("label", ""))
+            cluster = hp.get("cluster")
+            color = cmap(int(cluster) % 10) if cluster is not None else "red"
+            if set_name == "train" and idx is not None and 0 <= idx < len(train_emb):
+                x, y = train_emb[idx]
+                ax.scatter([x], [y], color=color, s=60, marker="o", edgecolors="black", zorder=5)
+                ax.text(x, y, label, fontsize=8, color=color, weight="bold", ha="left", va="bottom")
+            elif set_name == "test" and idx is not None and 0 <= idx < len(test_emb):
+                x, y = test_emb[idx]
+                ax.scatter([x], [y], color=color, s=60, marker="x", zorder=5)
+                ax.text(x, y, label, fontsize=8, color=color, weight="bold", ha="left", va="bottom")
+
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.tight_layout()
     fig.savefig(path, dpi=200)
     plt.close(fig)
     print(f"Saved cluster plot to {path}")
 
-def run_position_for_testing(
-    pos: str,
-    k: int,
-    seed: int = 42,
-    with_pca: float | bool = 0.95,
-    use_groups=None,
-):
-    """
-    Lightweight version of run_position() that:
-      - loads data
-      - does train/val/test split
-      - builds numeric masks & PCA
-      - fits final model with provided k
-      - returns exactly the data needed for tests:
-            X_train, X_test, train_df, test_df, labels_train, labels_test, model
-    """
-    df = load_position_df(pos)
-    train_df, val_df, test_df = stratified_split(df, seed=seed)
 
-    allowed_numeric = select_group_columns(train_df, use_groups)
-    numeric_cols = feature_mask_from_train(train_df, allowed_numeric=allowed_numeric)
-
-    feats = fit_transforms(
-        train_df, val_df, test_df,
-        numeric_cols,
-        with_pca=with_pca,
-        seed=seed,
-    )
-
-    X_train = feats["X_train"]
-    X_test = feats["X_test"]
-
-    model = fit_final_model(X_train, k, seed=seed)
-
-    labels_train = model.labels_
-    labels_test = model.predict(X_test)
-
-    return {
-        "X_train": X_train,
-        "X_test": X_test,
-        "train_df": train_df,
-        "test_df": test_df,
-        "labels_train": labels_train,
-        "labels_test": labels_test,
-        "model": model,
-    }
-
+# ---------------------------------------------------------------------
+# Main clustering + recommendation
+# ---------------------------------------------------------------------
 
 
 def run_position(
@@ -545,17 +491,15 @@ def run_position(
     group_presets=None,
     include_pca_top: bool = False,
     pca_top_n: int = 15,
-    example_players=None,
     recommend_players=None,
     compute_graph_stats: bool = False,
     plot_clusters: bool = False,
     plot_path: str | None = None,
     plot_all_pca: bool = False,
+    return_artifacts: bool = False,
 ):
     df = load_position_df(pos)
 
-    if isinstance(example_players, str):
-        example_players = [example_players]
     if isinstance(recommend_players, str):
         recommend_players = [recommend_players]
 
@@ -571,8 +515,8 @@ def run_position(
     best_row = None
     best_state = None
     runs_for_plot = []
-    
-    # -------- Model selection phase: choose groups + k ----------
+
+    # -------- Model selection phase: choose groups + PCA + k ----------
     for combo in combos:
         if combo == "pca_top":
             base_allowed = select_group_columns(train_df, use_groups) if use_groups else None
@@ -652,10 +596,8 @@ def run_position(
     else:
         test_sil = test_db = test_ch = np.nan
 
-    test_knn_stats = {"reciprocity": np.nan, "mean_kth_dist": np.nan}
     test_self_hit = np.nan
     if compute_graph_stats:
-        test_knn_stats = knn_reciprocity_stats(feats["X_test"], test_labels, k=10)
         test_self_hit = self_hit_rate(feats["X_test"], test_labels, k=10)
 
     print("\nTest metrics:")
@@ -664,20 +606,26 @@ def run_position(
             "silhouette": float(test_sil) if test_sil == test_sil else np.nan,
             "db": float(test_db) if test_db == test_db else np.nan,
             "ch": float(test_ch) if test_ch == test_ch else np.nan,
-            **test_knn_stats,
             "self_hit_at_10": test_self_hit,
         }
     )
 
     if plot_clusters:
         try:
-            plot_out = Path(plot_path) if plot_path else Path(__file__).resolve().parents[2] / "plots" / f"{pos}_clusters.png"
-            save_cluster_plot(feats["X_train"], feats["X_test"], km.labels_, test_labels, pos, plot_out)
+            cluster_plot_path = Path(plot_path) if plot_path else PLOTS_DIR / f"{pos}_clusters.png"
+            save_cluster_plot(
+                feats["X_train"],
+                feats["X_test"],
+                km.labels_,
+                test_labels,
+                pos,
+                cluster_plot_path,
+            )
         except Exception as e:
             print(f"Could not plot clusters: {e}")
 
     if plot_clusters and plot_all_pca and runs_for_plot:
-        base_dir = Path(plot_path).parent if plot_path else Path(__file__).resolve().parents[2] / "plots"
+        base_dir = (Path(plot_path).parent if plot_path else PLOTS_DIR)
         for run in runs_for_plot:
             try:
                 km_plot = fit_final_model(run["feats"]["X_train"], run["best_k"], seed=seed)
@@ -686,44 +634,16 @@ def run_position(
                 pca_tag = str(run["pca_opt"]).replace(".", "p")
                 fname = f"{pos}_{combo_tag}_pca{pca_tag}_k{run['best_k']}.png"
                 plot_out = base_dir / fname
-                save_cluster_plot(run["feats"]["X_train"], run["feats"]["X_test"], km_plot.labels_, test_labels_plot, pos, plot_out)
+                save_cluster_plot(
+                    run["feats"]["X_train"],
+                    run["feats"]["X_test"],
+                    km_plot.labels_,
+                    test_labels_plot,
+                    pos,
+                    plot_out,
+                )
             except Exception as e:
                 print(f"Could not plot combo {run['combo']} with_pca={run['pca_opt']}: {e}")
-
-                
-    # -------- In-split neighbor inspection (test -> train) ----------
-    neighbors_fn = nearest_train_neighbors(
-        km,
-        feats["X_train"],
-        train_df,
-        feats["X_test"],
-        test_df,
-        test_labels,
-        k=5,
-        prefer_same_foot=False,
-        prefer_same_side=False,
-        max_age_diff=None,
-    )
-
-    if len(test_df) > 0:
-        if example_players and "Player" not in test_df.columns:
-            print("\nCannot show named examples because 'Player' column is missing.")
-        elif example_players:
-            for name in example_players:
-                matches = test_df.index[test_df["Player"].str.lower() == str(name).lower()]
-                if len(matches) == 0:
-                    print(f"\nNo test player named '{name}' found.")
-                    continue
-                for idx in matches:
-                    example = neighbors_fn(int(idx))
-                    label = test_df.loc[idx, "Player"]
-                    print(f"\nNearest train neighbors for test player '{label}':")
-                    print(example)
-        else:
-            example = neighbors_fn(0)
-            label = test_df.iloc[0]["Player"] if "Player" in test_df.columns else "index 0"
-            print(f"\nNearest train neighbors for first test player ({label}):")
-            print(example)
 
     # -------- Full-pool recommender (train on entire position subset) ----------
     if recommend_players:
@@ -737,7 +657,6 @@ def run_position(
             full_imp = full_imputer.fit_transform(full_num)
             full_scaled = full_scaler.fit_transform(full_imp)
 
-            full_pca = None
             if best_with_pca:
                 full_pca = PCA(
                     n_components=best_with_pca,
@@ -786,7 +705,7 @@ def run_position(
                     print("\nKNN distance baselines for this query:")
                     print(eval_stats)
 
-    return {
+    result = {
         "val_results": results_summary,
         "best_combo": best_combo,
         "best_k": best_k,
@@ -795,268 +714,318 @@ def run_position(
             "silhouette": test_sil,
             "db": test_db,
             "ch": test_ch,
-            **test_knn_stats,
             "self_hit_at_10": test_self_hit,
         },
     }
 
-def run_knn_evaluation(
-    pos: str = "FW",
-    k_neighbors: int = 10,
-    n_queries: int = 100,
+    if return_artifacts:
+        result["artifacts"] = {
+            "train_df": train_df,
+            "val_df": val_df,
+            "test_df": test_df,
+            "numeric_cols": numeric_cols,
+            "feats": feats,
+            "labels_train": km.labels_,
+            "labels_test": test_labels,
+            "model": km,
+        }
+
+    return result
+
+
+# ---------------------------------------------------------------------
+# Error analysis helpers
+# ---------------------------------------------------------------------
+
+
+def _cross_split_distance_baselines(
+    train_X: np.ndarray,
+    train_labels: np.ndarray,
+    train_df: pd.DataFrame,
+    test_X: np.ndarray,
+    test_labels: np.ndarray,
+    test_df: pd.DataFrame,
+    k: int = 5,
+    n_random: int = 200,
+    sample_size: int | None = 150,
     seed: int = 42,
-    with_pca: float | bool = 0.95,
-    use_groups=None,
-):
+) -> pd.DataFrame:
     """
-    End-to-end KNN evaluation on a held-out test set.
-
-    Steps:
-      1) Load position-specific data and do leak-free train/val/test split.
-      2) Build numeric feature mask on train and fit transforms (imputer, scaler, PCA).
-      3) Fit KMeans on train only, get cluster labels for train and test.
-      4) For N random test players:
-           - Compute mean distance to their k nearest train neighbors (within same cluster).
-           - Compute mean distance to k random train players:
-               a) from same cluster
-               b) from same base position (i.e., any train row)
-           - Record distances and ratios.
-      5) Return a summary dict + per-query DataFrame for reporting.
+    Compare KNN distances for test queries against random baselines drawn from the train pool.
+    Returns a DataFrame with per-query gaps for downstream summarization.
     """
-    # 1) Load and split
-    df = load_position_df(pos)
-    train_df, val_df, test_df = stratified_split(df, seed=seed)
-
-    # 2) Feature selection and transforms (no PCA grid search here; single setting)
-    allowed_numeric = select_group_columns(train_df, use_groups)
-    numeric_cols = feature_mask_from_train(train_df, allowed_numeric=allowed_numeric)
-
-    feats = fit_transforms(
-        train_df,
-        val_df,
-        test_df,
-        numeric_cols,
-        with_pca=with_pca,
-        seed=seed,
-    )
-
-    X_train = feats["X_train"]
-    X_test = feats["X_test"]
-
-    # 3) Fit KMeans on train, get labels
-    #    You can choose k here or reuse a fixed small grid; for simplicity pick a reasonable default.
-    #    Option 1: fixed k (e.g., 4); Option 2: small sweep like in run_position.
-    #    Here we do a tiny sweep over k_grid=(3,4) on val.
-    k_grid = (3, 4)
-    val_results = sweep_k(feats["X_train"], feats["X_val"], val_df, k_grid, seed=seed)
-    best_k = choose_k(val_results)
-
-    km = fit_final_model(X_train, best_k, seed=seed)
-    labels_train = km.labels_
-    labels_test = km.predict(X_test)
-
-    # Build per-cluster KNN on TRAIN (cosine distance)
-    per_cluster = build_per_cluster_knn(
-        X_train,
-        labels_train,
-        n_neighbors=k_neighbors + 1,
-        metric="cosine",
-    )
-
     rng = np.random.default_rng(seed)
-    n_test = X_test.shape[0]
-    if n_test == 0:
-        raise RuntimeError("Empty test set; cannot run KNN evaluation.")
-
-    query_indices = rng.choice(
-        np.arange(n_test),
-        size=min(n_queries, n_test),
-        replace=False,
-    )
+    per_cluster = build_per_cluster_knn(train_X, train_labels, n_neighbors=k + 1, metric="cosine")
+    query_idx = np.arange(len(test_X))
+    if sample_size is not None and sample_size < len(query_idx):
+        query_idx = rng.choice(query_idx, size=sample_size, replace=False)
 
     rows = []
 
-    for local_idx in query_indices:
-        cluster = labels_test[local_idx]
-        if int(cluster) not in per_cluster:
+    for idx in query_idx:
+        cluster = int(test_labels[idx])
+        if cluster not in per_cluster:
             continue
-
-        nn, train_idx = per_cluster[int(cluster)]
-
-        # --- true KNN distances: test -> train within same cluster ---
-        n_q = min(k_neighbors + 1, len(train_idx))
-        dists, inds = nn.kneighbors(
-            X_test[local_idx].reshape(1, -1),
-            n_neighbors=n_q,
-        )
-        global_inds = train_idx[inds[0]]
-
-        # Drop any accidental exact duplicate if it exists in train with same index
-        # (unlikely here because pools differ, but keep consistent with other utilities).
-        knn_dists = dists[0][:k_neighbors]
-        if len(knn_dists) == 0:
+        nn, pool_idx = per_cluster[cluster]
+        n_q = min(k, len(pool_idx))
+        if n_q == 0:
             continue
+        dists, inds = nn.kneighbors(test_X[idx].reshape(1, -1), n_neighbors=n_q)
+        knn_dists = dists[0][:k]
+        mean_knn = float(knn_dists.mean()) if len(knn_dists) else float("nan")
 
-        mean_knn_dist = float(knn_dists.mean())
+        def rand_mean(candidates: np.ndarray) -> float:
+            if len(candidates) == 0:
+                return float("nan")
+            size = min(n_random, len(candidates))
+            replace = len(candidates) < n_random
+            sample_idx = rng.choice(candidates, size=size, replace=replace)
+            rand_dists = cosine_distances(test_X[idx].reshape(1, -1), train_X[sample_idx])[0]
+            return float(rand_dists.mean())
 
-        # --- random baselines from train ---
+        same_cluster_idx = np.where(train_labels == cluster)[0]
+        rand_same_cluster = rand_mean(same_cluster_idx)
 
-        # a) random from same cluster (train side)
-        same_cluster_train_idx = np.where(labels_train == cluster)[0]
-        same_cluster_train_idx = same_cluster_train_idx[
-            np.isin(same_cluster_train_idx, train_idx)
-        ]
-        if len(same_cluster_train_idx) > 0:
-            size_sc = min(k_neighbors, len(same_cluster_train_idx))
-            rand_sc = rng.choice(
-                same_cluster_train_idx,
-                size=size_sc,
-                replace=len(same_cluster_train_idx) < k_neighbors,
-            )
-            rand_sc_dists = cosine_distances(
-                X_test[local_idx].reshape(1, -1),
-                X_train[rand_sc],
-            )[0]
-            mean_rand_same_cluster = float(rand_sc_dists.mean())
+        query_pos = test_df.loc[idx, "Pos"] if "Pos" in test_df.columns else None
+        if query_pos is not None:
+            same_pos_idx = train_df.index[train_df["Pos"] == query_pos].to_numpy()
+            rand_same_pos = rand_mean(same_pos_idx)
         else:
-            mean_rand_same_cluster = float("nan")
+            rand_same_pos = float("nan")
 
-        # b) random from entire train pool (same base position)
-        all_train_idx = np.arange(X_train.shape[0])
-        size_gl = min(k_neighbors, len(all_train_idx))
-        rand_gl = rng.choice(
-            all_train_idx,
-            size=size_gl,
-            replace=len(all_train_idx) < k_neighbors,
+        rand_global = rand_mean(np.arange(train_X.shape[0]))
+
+        rows.append(
+            {
+                "idx": int(idx),
+                "player": str(test_df.loc[idx, "Player"]) if "Player" in test_df.columns else f"idx_{idx}",
+                "cluster": cluster,
+                "mean_knn_dist": mean_knn,
+                "mean_rand_same_cluster": rand_same_cluster,
+                "mean_rand_same_pos": rand_same_pos,
+                "mean_rand_global": rand_global,
+            }
         )
-        rand_gl_dists = cosine_distances(
-            X_test[local_idx].reshape(1, -1),
-            X_train[rand_gl],
-        )[0]
-        mean_rand_global = float(rand_gl_dists.mean())
 
-        # --- ratios ---
-        row = {
-            "test_idx": int(local_idx),
-            "player": (
-                test_df.loc[local_idx, "Player"]
-                if "Player" in test_df.columns
-                else None
-            ),
-            "cluster": int(cluster),
-            "mean_knn_dist": mean_knn_dist,
-            "mean_rand_same_cluster": mean_rand_same_cluster,
-            "mean_rand_global": mean_rand_global,
-            "same_cluster_ratio": (
-                mean_rand_same_cluster / mean_knn_dist
-                if not np.isnan(mean_rand_same_cluster)
-                else np.nan
-            ),
-            "global_ratio": mean_rand_global / mean_knn_dist,
+    return pd.DataFrame(rows)
+
+
+def _summarize_baseline_gaps(df: pd.DataFrame) -> dict:
+    """
+    Aggregate KNN-vs-random gap statistics for error analysis.
+    """
+    if df.empty:
+        return {
+            "n_queries": 0,
+            "avg_knn_dist": float("nan"),
+            "gap_same_cluster": {"mean": float("nan"), "pct_positive": float("nan")},
+            "gap_same_pos": {"mean": float("nan"), "pct_positive": float("nan")},
+            "gap_global": {"mean": float("nan"), "pct_positive": float("nan")},
         }
-        rows.append(row)
 
-    results_df = pd.DataFrame(rows)
+    df = df.copy()
+    df["gap_same_cluster"] = df["mean_rand_same_cluster"] - df["mean_knn_dist"]
+    df["gap_same_pos"] = df["mean_rand_same_pos"] - df["mean_knn_dist"]
+    df["gap_global"] = df["mean_rand_global"] - df["mean_knn_dist"]
 
-    # Aggregate summary for the report
-    summary = {
-        "pos": pos,
-        "k_neighbors": k_neighbors,
-        "best_k_clusters": best_k,
-        "n_queries_effective": int(len(results_df)),
-        "mean_knn_dist": float(results_df["mean_knn_dist"].mean())
-        if not results_df.empty
-        else float("nan"),
-        "mean_same_cluster_ratio": float(results_df["same_cluster_ratio"].mean())
-        if "same_cluster_ratio" in results_df.columns and not results_df.empty
-        else float("nan"),
-        "mean_global_ratio": float(results_df["global_ratio"].mean())
-        if "global_ratio" in results_df.columns and not results_df.empty
-        else float("nan"),
-    }
-
-    print("\nKNN evaluation summary (test -> train):")
-    print(summary)
+    def gap_stats(col):
+        vals = df[col].dropna()
+        return {
+            "mean": float(vals.mean()) if len(vals) else float("nan"),
+            "pct_positive": float((vals > 0).mean()) if len(vals) else float("nan"),
+        }
 
     return {
-        "summary": summary,
-        "per_query": results_df,
-        "val_results": val_results.to_dict(orient="records"),
+        "n_queries": int(len(df)),
+        "avg_knn_dist": float(df["mean_knn_dist"].mean()),
+        "gap_same_cluster": gap_stats("gap_same_cluster"),
+        "gap_same_pos": gap_stats("gap_same_pos"),
+        "gap_global": gap_stats("gap_global"),
     }
 
 
+def run_error_analysis(
+    pos: str = "FW",
+    k_grid=(3, 4),
+    with_pca=2,
+    with_pca_grid: tuple[float | bool, ...] | None = None,
+    use_groups=None,
+    seed: int = 42,
+    k_neighbors: int = 10,
+    sample_size: int | None = 150,
+    n_random: int = 200,
+    plot_outliers: bool = False,
+    plot_path: str | None = None,
+    top_n_knn_outliers: int = 3,
+    outlier_method: str = "gap",
+):
+    """
+    Convenience wrapper to pick the best model for a position, then report
+    error-analysis diagnostics:
+      - self-hit rate (from run_position)
+      - distance gaps vs random baselines for sampled queries
+      - worst-case examples for qualitative inspection (by gap or by mean KNN)
 
-if __name__ == "__main__":
-    # run_position(
-    #     pos="FW",
-    #     k_grid=(3, 4),
-    #     with_pca=0.6,
-    #     include_pca_top=True,
-    #     recommend_players=["Lamine Yamal"],
-    #     pca_top_n=15,
-    #     group_presets=[
-    #         None,
-    #         ["goal_shot_creation"],
-    #         ["passing", "goal_shot_creation"],
-    #         ["passing", "goal_shot_creation", "pass_types", "possession"],
-    #         ["passing", "goal_shot_creation", "pass_types", "possession", "defense", "misc"],
-    #     ],
-    #     compute_graph_stats=False
-    # )
-    # run_position(
-    #     pos="MF",
-    #     k_grid=(4, 5),
-    #     with_pca=0.6,
-    #     include_pca_top=True,
-    #     recommend_players=["Pedri"],
-    #     pca_top_n=15,
-    #     group_presets=[
-    #         None,
-    #         ["passing", "chance_creation"],
-    #         ["passing", "chance_creation", "possession"],
-    #         ["passing", "chance_creation", "possession", "defense", "misc"],
-    #     ],
-    #     compute_graph_stats=False
-    # )
-#     run_position(
-#     pos="FW",
-#     group_presets=[
-#             None,
-#             ["passing", "goal_shot_creation", "pass_types", "possession"],
-#         ],
-#     k_grid=(3,4),
-#     with_pca_grid=(2,3),
-#     plot_clusters=True,
-#     plot_all_pca=True,  # saves plots for each tested PCA preset
-#     include_pca_top=True,
-#     pca_top_n=32,
-#     recommend_players=["Lamine Yamal"],
-#     compute_graph_stats=True
-# )
-    
-    eval_fw = run_knn_evaluation(
-        pos="FW",
-        k_neighbors=10,
-        n_queries=100,
-        seed=42,
-        with_pca=0.95,
-        use_groups=["passing", "goal_shot_creation", "pass_types", "possession"],
+    If plot_outliers is True, also saves a 2D scatter with the worst examples annotated.
+    """
+    # Ensure we also get a base cluster plot out of run_position
+    cluster_plot_path = (
+        Path(plot_path) if plot_path else PLOTS_DIR / f"{pos}_clusters.png"
     )
 
+    result = run_position(
+        pos=pos,
+        k_grid=k_grid,
+        with_pca=with_pca,
+        with_pca_grid=with_pca_grid,
+        use_groups=use_groups,
+        seed=seed,
+        compute_graph_stats=True,
+        plot_clusters=True,
+        plot_path=str(cluster_plot_path),
+        plot_all_pca=False,
+        return_artifacts=True,
+    )
+    artifacts = result.get("artifacts")
+    if artifacts is None:
+        raise RuntimeError("run_position did not return artifacts; set return_artifacts=True.")
+
+    train_df = artifacts["train_df"]
+    test_df = artifacts["test_df"]
+    train_X = artifacts["feats"]["X_train"]
+    test_X = artifacts["feats"]["X_test"]
+    train_labels = artifacts["labels_train"]
+    test_labels = artifacts["labels_test"]
+
+    # KNN vs random baselines for held-out queries
+    baselines = _cross_split_distance_baselines(
+        train_X,
+        train_labels,
+        train_df,
+        test_X,
+        test_labels,
+        test_df,
+        k=k_neighbors,
+        n_random=n_random,
+        sample_size=sample_size,
+        seed=seed,
+    )
+    baseline_summary = _summarize_baseline_gaps(baselines)
+
+    # Worst cases by weakest cluster gap
+    baselines = baselines.copy()
+    baselines["gap_same_cluster"] = baselines["mean_rand_same_cluster"] - baselines["mean_knn_dist"]
+    worst_examples = []
+    neighbors_fn = nearest_train_neighbors(
+        artifacts["model"],
+        train_X,
+        train_df,
+        test_X,
+        test_df,
+        test_labels,
+        k=k_neighbors,
+    )
+
+    for _, row in baselines.nsmallest(3, "gap_same_cluster").iterrows():
+        neighbors = neighbors_fn(int(row["idx"]))
+        worst_examples.append(
+            {
+                "idx": int(row["idx"]),
+                "player": row.get("player"),
+                "cluster": int(row["cluster"]),
+                "gap_same_cluster": float(row["gap_same_cluster"]),
+                "mean_knn_dist": float(row["mean_knn_dist"]),
+                "neighbors": neighbors.to_dict(orient="records"),
+            }
+        )
+
+    # Highest mean_knn_dist outliers (regardless of gap)
+    worst_by_knn = []
+    if not baselines.empty:
+        for _, row in baselines.nlargest(top_n_knn_outliers, "mean_knn_dist").iterrows():
+            neighbors = neighbors_fn(int(row["idx"]))
+            worst_by_knn.append(
+                {
+                    "idx": int(row["idx"]),
+                    "player": row.get("player"),
+                    "cluster": int(row["cluster"]),
+                    "mean_knn_dist": float(row["mean_knn_dist"]),
+                    "neighbors": neighbors.to_dict(orient="records"),
+                }
+            )
+
+    if plot_outliers:
+        highlights = []
+        chosen = worst_by_knn if outlier_method == "knn" else worst_examples
+        for ex in chosen:
+            highlights.append(
+                {
+                    "set": "test",
+                    "index": ex["idx"],
+                    "label": ex.get("player"),
+                    "cluster": ex.get("cluster"),
+                }
+            )
+        out_path = (
+            Path(plot_path)
+            if plot_path
+            else PLOTS_DIR / f"{pos}_outliers.png"
+        )
+        try:
+            save_cluster_plot(
+                train_X,
+                test_X,
+                train_labels,
+                test_labels,
+                pos,
+                out_path,
+                highlight_points=highlights,
+            )
+        except Exception as e:
+            print(f"Could not plot outliers: {e}")
+
+    return {
+        "model_selection": {
+            "best_k": result["best_k"],
+            "best_combo": result["best_combo"],
+            "best_with_pca": result["best_with_pca"],
+        },
+        "graph_metrics": result["test_metrics"],
+        "baseline_summary": baseline_summary,
+        "worst_examples": worst_examples,
+        "worst_by_knn": worst_by_knn,
+    }
 
 
-    # run_position(
-    #     pos="GK",
-    #     k_grid=(2, 3),
-    #     with_pca=0.6,
-    #     include_pca_top=True,
-    #     recommend_players=["Thibaut Courtois"],
-    #     pca_top_n=15,
-    #     group_presets=[
-    #         None,
-    #         ["goalkeeping_shots"],
-    #         ["goalkeeping_shots", "goalkeeping_distribution"],
-    #         ["goalkeeping_shots", "goalkeeping_distribution", "goalkeeping_misc"],
-    #     ],
-    #     compute_graph_stats=False
-    # )
+# ---------------------------------------------------------------------
+# Example usage (you can tweak per position)
+# ---------------------------------------------------------------------
+
+if __name__ == "__main__":
+    groups_pos = {
+        "FW": ["passing", "goal_shot_creation", "pass_types", "possession", "misc"],
+        "MF": ["passing", "goal_shot_creation", "pass_types", "possession", "defensive_actions", "misc"],
+        "DF": ["passing", "pass_types", "defensive_actions", "aerial_duels", "misc"],
+        "GK": ["goalkeepping","passing", "pass_types", "misc"],
+    }
+    from pprint import pprint
+    for pos in ["FW", "MF", "DF", "GK"]:
+        print(f"\n=== Running error analysis for position: {pos} ===")
+        res = run_error_analysis(
+            pos=pos,
+            use_groups=["passing", "goal_shot_creation", "pass_types", "possession", "defensive_actions", "misc"],
+            k_grid=(3, 4, 5),
+            with_pca_grid=(False, 2, 3),
+            sample_size=None,
+            k_neighbors=10,
+            top_n_knn_outliers=3,
+            outlier_method="knn",
+            plot_outliers=False,
+            plot_path=None,
+        )
+        pprint(res["model_selection"])
+        pprint(res["baseline_summary"])
+        print("Worst examples by cluster gap:")
+        pprint([{k: ex[k] for k in ["player", "gap_same_cluster", "mean_knn_dist"]} for ex in res["worst_examples"]])
+        print("Worst examples by mean KNN distance:")
+        pprint([{k: ex[k] for k in ["player", "mean_knn_dist"]} for ex in res["worst_by_knn"]])
