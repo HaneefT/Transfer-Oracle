@@ -1070,6 +1070,28 @@ def run_error_analysis(
         except Exception as e:
             print(f"Could not plot outliers: {e}")
 
+    worst_stats = []
+    chosen = worst_by_knn if outlier_method == "knn" else worst_examples
+    numeric_cols_used = artifacts.get("numeric_cols", [])
+    meta_cols = [c for c in ["Player", "Pos", "Squad", "Comp"] if c in test_df.columns]
+    for ex in chosen:
+        idx = ex["idx"]
+        if 0 <= idx < len(test_df):
+            cols_to_show = meta_cols + [c for c in numeric_cols_used if c in test_df.columns]
+            row = test_df.iloc[idx][cols_to_show].to_dict()
+            worst_stats.append(
+                {
+                    "player": ex.get("player"),
+                    "cluster": ex.get("cluster"),
+                    "stats": row,
+                }
+            )
+    if worst_stats:
+        print("\nWorst outlier stats (chosen set):")
+        for entry in worst_stats:
+            print(f"{entry['player']} (cluster {entry['cluster']}):")
+            print(entry["stats"])
+
     return {
         "model_selection": {
             "best_k": result["best_k"],
@@ -1080,6 +1102,7 @@ def run_error_analysis(
         "baseline_summary": baseline_summary,
         "worst_examples": worst_examples,
         "worst_by_knn": worst_by_knn,
+        "worst_stats": worst_stats,
     }
 
 
@@ -1092,15 +1115,18 @@ if __name__ == "__main__":
         "FW": ["passing", "goal_shot_creation", "pass_types","misc"],
         "MF": ["passing", "goal_shot_creation", "pass_types", "defensive_actions", "misc"],
         "DF": ["defensive_actions","possession", "misc"],
-        "GK": ["goalkeeing", "pass_types"],
+        "GK": ["goalkeeping", "pass_types"],
     }
     run_position(
-        pos="GK",
-        k_grid=(2,3),
+        pos="FW",
+        k_grid=(3,4,5),
         with_pca_grid=(False, 2, 3),
-        group_presets=[groups_pos["GK"], ["passing", "goalkeeping", "pass_types", "possession"],
-                       ["passing", "goalkeeping", "pass_types","defensive_actions", "misc"],
-                       ["passing", "goalkeeping", "pass_types","defensive_actions"]],
+        group_presets=[groups_pos["FW"],["performance", "passing", "pass_types", "defensive_actions"],
+                       ["passing", "performance", "pass_types","misc"],
+                       ["performance", "passing"],
+                       ["passing", "performance", "goal_shot_creation", "defensive_actions", "misc"],
+                       ["performance", "passing", "defensive_actions"],
+                       ["performance", "passing", "goal_shot_creation", "defensive_actions", "pass_types"]],
         compute_graph_stats=True,
         plot_clusters=True,
         plot_path=None,
@@ -1113,7 +1139,7 @@ if __name__ == "__main__":
     #     print(f"\n=== Running error analysis for position: {pos} ===")
     #     res = run_error_analysis(
     #         pos=pos,
-    #         use_groups=["passing", "goal_shot_creation", "pass_types", "possession", "defensive_actions", "misc"],
+    #         use_groups=groups_pos[pos],
     #         k_grid=(3, 4, 5),
     #         with_pca_grid=(False, 2, 3),
     #         sample_size=None,
