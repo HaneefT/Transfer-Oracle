@@ -1005,8 +1005,8 @@ if __name__ == "__main__":
     groups_pos = {
         "FW": ["passing", "goal_shot_creation", "pass_types", "possession", "misc"],
         "MF": ["passing", "goal_shot_creation", "pass_types", "possession", "defensive_actions", "misc"],
-        "DF": ["passing", "pass_types", "defensive_actions", "aerial_duels", "misc"],
-        "GK": ["goalkeepping","passing", "pass_types", "misc"],
+        "DF": ["defensive_actions","possession", "misc"],
+        "GK": ["goalkeeping", "pass_types"],
     }
     from pprint import pprint
     # for pos in ["FW", "MF", "DF", "GK"]:
