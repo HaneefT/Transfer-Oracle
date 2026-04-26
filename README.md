@@ -3,6 +3,8 @@
 ## Overview
 Transfer Oracle is an intelligent recommendation system designed to identify football player replacements based on playing style archetypes using unsupervised machine learning. It leverages player statistics,  and clustering techniques to discover and classify player archetypes and then recommends the most similar players as replacements.
 
+Try it out: [⚽](https://transfer-oracle.vercel.app/)
+
 ## Features
 - Uses K-Means clustering to discover player archetypes within each position.
 - Employs K-Nearest Neighbors (KNN) to find similar players filtered by position and archetype.
